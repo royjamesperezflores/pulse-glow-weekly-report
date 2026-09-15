@@ -99,8 +99,8 @@ def delta(now, before):
     return f"{now - before:+d} ({(now - before) / before * 100:+.0f}%)"
 
 
-def chart_base64(series) -> str:
-    """Weekly trend as an inline data URI, so the email needs no attachments."""
+def chart_png(series) -> bytes:
+    """Weekly trend chart as raw PNG bytes."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -121,10 +121,10 @@ def chart_base64(series) -> str:
     buffer = io.BytesIO()
     figure.savefig(buffer, format="png", dpi=140)
     plt.close(figure)
-    return base64.b64encode(buffer.getvalue()).decode()
+    return buffer.getvalue()
 
 
-def render(connection) -> tuple[str, str, Path]:
+def render(connection) -> tuple[str, str, bytes, Path]:
     latest = connection.execute(
         "SELECT MAX(date) FROM session_metrics_daily WHERE dimension = 'day'"
     ).fetchone()[0]
@@ -179,7 +179,7 @@ def render(connection) -> tuple[str, str, Path]:
     alert_html = ("<div class=alert><b>Alerts</b><ul>"
                   + "".join(f"<li>{a}</li>" for a in alerts) + "</ul></div>") if alerts else ""
 
-    chart = chart_base64(weekly_series(connection, end))
+    chart = chart_png(weekly_series(connection, end))
     stored = connection.execute("SELECT COUNT(*) FROM session_metrics_daily").fetchone()[0]
     subject = (f"Pulse and Glow — weekly funnel, {iso(end)} "
                f"({now['sessions']} sessions, {now['orders']} orders)")
@@ -215,7 +215,7 @@ and can exceed 100%.</p>
 <table><tr><th></th><th class=n>This week</th><th class=n>Prior week</th><th class=n>Change</th></tr>{who}</table>
 <p class=note>Bot share this week: <b>{bot_share * 100:.1f}%</b> ·
 Human cart-add rate: <b>{pct(now_b['human_carts'], now_b['human'])}</b></p>
-<img src="data:image/png;base64,{chart}" alt="Weekly sessions, human vs total">
+<img src="__CHART_SRC__" alt="Weekly sessions, human vs total">
 <h2>Entry page, humans only</h2>
 <table><tr><th>Entry</th><th class=n>Sessions</th><th class=n>Cart adds</th><th class=n>Rate</th></tr>{entries}</table>
 <p class=note>The headline finding, refreshed each week: homepage entrants add to cart,
@@ -224,7 +224,7 @@ product-page entrants historically do not.</p>
 </div></body></html>"""
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    return subject, html, REPORT_DIR / f"{iso(end)}.html"
+    return subject, html, chart, REPORT_DIR / f"{iso(end)}.html"
 
 
 def send_via_http(subject: str, html: str) -> bool:
@@ -263,13 +263,16 @@ def send_via_http(subject: str, html: str) -> bool:
     return True
 
 
-def send_email(subject: str, html: str) -> bool:
+def send_email(subject: str, html: str, chart: bytes | None = None,
+               html_standalone: str | None = None) -> bool:
     """Email the report. Missing credentials is a skip, not a crash."""
     import smtplib
     from email.message import EmailMessage
 
-    # HTTPS first — it works on networks that block SMTP ports.
-    if send_via_http(subject, html):
+    # HTTPS first — it works on networks that block SMTP ports. It gets the
+    # self-contained copy: cid: references only resolve for a MIME-attached
+    # image, which an HTTP JSON payload has no way to carry.
+    if send_via_http(subject, html_standalone or html):
         return True
 
     host, port = os.getenv("SMTP_HOST"), os.getenv("SMTP_PORT")
@@ -286,6 +289,13 @@ def send_email(subject: str, html: str) -> bool:
     message["To"] = recipient
     message.set_content("This report is HTML. Open it in a mail client that renders HTML.")
     message.add_alternative(html, subtype="html")
+
+    # Gmail strips data: URI images, so the chart has to travel as a real
+    # attachment referenced by Content-ID. The saved HTML file still uses a
+    # data URI so that it stays a single self-contained file on disk.
+    if chart:
+        message.get_payload()[1].add_related(
+            chart, "image", "png", cid="<chartimg>", filename="weekly-chart.png")
 
     # Networks that block one SMTP port usually allow the other, so try both:
     # 465 is implicit SSL, 587 is STARTTLS. Whichever connects first wins.
@@ -324,12 +334,19 @@ def main() -> int:
         pull_sessions.main()
 
         connection = sqlite3.connect(DB_PATH)
-        subject, html, path = render(connection)
+        subject, template, chart, path = render(connection)
         connection.close()
 
-        path.write_text(html)
+        # Two renderings of the same report: the file embeds the chart as a
+        # data URI so it opens standalone; the email references the attached
+        # copy by Content-ID because mail clients refuse data: URIs.
+        file_html = template.replace(
+            "__CHART_SRC__", "data:image/png;base64," + base64.b64encode(chart).decode())
+        email_html = template.replace("__CHART_SRC__", "cid:chartimg")
+
+        path.write_text(file_html)
         print(f"report written to {path.relative_to(PROJECT_ROOT)}")
-        send_email(subject, html)
+        send_email(subject, email_html, chart, html_standalone=file_html)
         print("=== run OK ===")
         return 0
     except Exception:
