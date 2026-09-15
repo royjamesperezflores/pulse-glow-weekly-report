@@ -10,7 +10,10 @@ mkdir -p "$PROJECT/logs"
 {
   echo "--- $(date '+%Y-%m-%d %H:%M:%S') starting ---"
   cd "$PROJECT" || { echo "FATAL: project directory missing"; exit 1; }
-  "$PROJECT/.venv/bin/python" "$PROJECT/src/weekly_report.py"
+  # -u keeps stdout unbuffered. Without it Python block-buffers stdout to the
+  # log file while stderr writes immediately, so tracebacks land ABOVE the
+  # lines that ran before them and the log lies about what happened when.
+  "$PROJECT/.venv/bin/python" -u "$PROJECT/src/weekly_report.py"
   status=$?
   echo "--- $(date '+%Y-%m-%d %H:%M:%S') exit $status ---"
   exit $status

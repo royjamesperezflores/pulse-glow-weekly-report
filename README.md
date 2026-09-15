@@ -43,6 +43,21 @@ than 20 human sessions in the week, puts a banner at the top. Both fired on the
 first production run, which is the point: the numbers below them are not
 measurable, and the report says so rather than presenting them as findings.
 
+**Delivery does not trust a single port.** The first production run failed with
+`TimeoutError` on 587: the network blocked outbound SMTP. The mailer now tries
+465 (implicit SSL) and 587 (STARTTLS), logging which one connected, and falls
+back to an HTTPS email API when `RESEND_API_KEY` is set — port 443 is not
+blocked by the networks that block SMTP. A scheduled job cannot retry its way
+out of a firewall, and the machine will not always be on the same network at
+08:00 on a Monday.
+
+**The log is unbuffered, and that was a bug first.** Python block-buffers stdout
+when it writes to a file while stderr writes immediately, so the first failure's
+traceback landed *above* the lines that had run before it — `tail` showed a clean
+ending for a run that had crashed. A scheduled job whose log misrepresents the
+order of events is worse than one with no log at all, so the runner invokes
+Python with `-u`.
+
 **The chart is a base64 data URI.** Inlined into the HTML so the email renders
 with no attachment and no image hosting.
 
@@ -56,7 +71,8 @@ report shows the stages and prints that caveat instead of a fake conversion rate
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env     # Shopify credentials + SMTP (Gmail needs an App Password)
+cp .env.example .env       # Shopify credentials
+./scripts/set_smtp_password.sh   # Gmail App Password, sanitized and stored once
 ./scripts/run_weekly.sh  # run it once by hand
 tail -30 logs/scheduler.log
 ```
@@ -76,6 +92,7 @@ bare environment and no shell profile.
 | `src/pull_sessions.py` | Seven ShopifyQL queries → upsert into `data/funnel.db` |
 | `src/shopify_client.py` | Client-credentials grant → 24-hour Admin API token |
 | `scripts/run_weekly.sh` | Cron entrypoint; logging and exit-code handling |
+| `scripts/set_smtp_password.sh` | Stores the App Password without echoing it or stacking duplicates |
 | `sql/schema.sql` | `session_metrics_daily` |
 
 Reports, the database, logs and `.env` are gitignored — this repo is the pipeline,

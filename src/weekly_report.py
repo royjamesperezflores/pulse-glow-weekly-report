@@ -227,17 +227,57 @@ product-page entrants historically do not.</p>
     return subject, html, REPORT_DIR / f"{iso(end)}.html"
 
 
+def send_via_http(subject: str, html: str) -> bool:
+    """Send over HTTPS instead of SMTP.
+
+    Campus and corporate networks routinely block outbound ports 465 and 587,
+    which is not something a scheduled job can retry its way out of. An HTTP
+    email API goes over 443 like any other web request, so the report gets
+    delivered from any network the machine can browse from.
+    """
+    import requests
+
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        return False
+
+    # Deliberately NOT reusing REPORT_FROM: that is a gmail.com address, and an
+    # HTTP email provider will reject a sender on a domain you have not verified.
+    # Until a domain is verified, the provider's own sender is the only one that
+    # works, and it can only deliver to the account owner's address.
+    sender = os.getenv("RESEND_FROM") or "onboarding@resend.dev"
+    recipient = os.getenv("REPORT_TO")
+
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"from": sender, "to": [recipient], "subject": subject, "html": html},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        # Surface the API's own message; it names the real problem (unverified
+        # domain, wrong sender, bad key) far better than a generic failure would.
+        raise RuntimeError(f"HTTP send failed {response.status_code}: {response.text[:400]}")
+
+    print(f"email sent to {recipient} over HTTPS (resend)")
+    return True
+
+
 def send_email(subject: str, html: str) -> bool:
     """Email the report. Missing credentials is a skip, not a crash."""
     import smtplib
     from email.message import EmailMessage
+
+    # HTTPS first — it works on networks that block SMTP ports.
+    if send_via_http(subject, html):
+        return True
 
     host, port = os.getenv("SMTP_HOST"), os.getenv("SMTP_PORT")
     user, password = os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD")
     sender, recipient = os.getenv("REPORT_FROM"), os.getenv("REPORT_TO")
 
     if not all([host, port, user, password, sender, recipient]):
-        print("email SKIPPED — SMTP settings incomplete in .env")
+        print("email SKIPPED — no RESEND_API_KEY and SMTP settings incomplete in .env")
         return False
 
     message = EmailMessage()
@@ -247,12 +287,33 @@ def send_email(subject: str, html: str) -> bool:
     message.set_content("This report is HTML. Open it in a mail client that renders HTML.")
     message.add_alternative(html, subtype="html")
 
-    with smtplib.SMTP(host, int(port), timeout=30) as server:
-        server.starttls()
-        server.login(user, password)
-        server.send_message(message)
-    print(f"email sent to {recipient}")
-    return True
+    # Networks that block one SMTP port usually allow the other, so try both:
+    # 465 is implicit SSL, 587 is STARTTLS. Whichever connects first wins.
+    attempts = [(465, "ssl"), (587, "starttls")]
+    configured = int(port)
+    attempts.sort(key=lambda a: a[0] != configured)  # try the configured port first
+
+    last_error = None
+    for attempt_port, mode in attempts:
+        try:
+            if mode == "ssl":
+                server = smtplib.SMTP_SSL(host, attempt_port, timeout=20)
+            else:
+                server = smtplib.SMTP(host, attempt_port, timeout=20)
+            with server:
+                if mode == "starttls":
+                    server.starttls()
+                server.login(user, password)
+                server.send_message(message)
+            print(f"email sent to {recipient} (port {attempt_port}, {mode})")
+            return True
+        except (OSError, smtplib.SMTPException) as error:
+            print(f"  port {attempt_port} ({mode}) failed: {type(error).__name__}: {error}")
+            last_error = error
+
+    raise RuntimeError(
+        f"Could not send on any SMTP port. Last error: {last_error}"
+    ) from last_error
 
 
 def main() -> int:
