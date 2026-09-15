@@ -10,6 +10,15 @@ This is the companion to [`pulse-glow-funnel-analysis`](https://github.com/royja
 which established the findings. That project answered a question once. This one
 answers it every week without being asked.
 
+## What it produces
+
+![Weekly funnel report](docs/sample-report.png)
+
+A real run, unedited — [`docs/sample-report.html`](docs/sample-report.html) is the file itself.
+Both alert thresholds fired on the first production run: 89.7% bot traffic and four
+human sessions for the week. That is the intended behaviour. The report says the
+numbers below it are not measurable rather than presenting them as findings.
+
 ## What a run does
 
 ```

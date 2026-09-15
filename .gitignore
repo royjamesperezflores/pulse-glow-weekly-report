@@ -223,3 +223,7 @@ reports/*.html
 logs/*.log
 .env
 .DS_Store
+
+# The committed sample output; live reports stay ignored.
+!docs/sample-report.html
+!docs/sample-report.png
